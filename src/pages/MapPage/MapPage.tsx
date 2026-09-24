@@ -19,10 +19,10 @@ export default function MapPage() {
   const getPositionStyle = (bench: Bench) => {
     const latRange = { min: 31.22, max: 31.25 };
     const lngRange = { min: 121.46, max: 121.495 };
-    
-    const normalizedLat = (bench.lat - latRange.min) / (latRange.max - latRange.min);
-    const normalizedLng = (bench.lng - lngRange.min) / (lngRange.max - lngRange.min);
-    
+
+    const normalizedLat = Math.min(1, Math.max(0, (bench.lat - latRange.min) / (latRange.max - latRange.min)));
+    const normalizedLng = Math.min(1, Math.max(0, (bench.lng - lngRange.min) / (lngRange.max - lngRange.min)));
+
     return {
       left: `${10 + normalizedLng * 80}%`,
       top: `${85 - normalizedLat * 70}%`,

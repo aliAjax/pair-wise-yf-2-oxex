@@ -10,6 +10,7 @@ import {
   Sunset,
   Moon,
   CloudSun,
+  AlertCircle,
 } from 'lucide-react';
 import { useBenchStore } from '@/store/useBenchStore';
 import {
@@ -32,12 +33,22 @@ import type {
 import Rating from '@/components/Rating/Rating';
 import { generateId } from '@/utils/comfort';
 
+const TIME_PERIOD_ORDER: TimePeriodType[] = ['morning', 'noon', 'afternoon', 'evening', 'night'];
+
+const timePeriodIcons: Record<TimePeriodType, typeof Sunrise> = {
+  morning: Sunrise,
+  noon: Sun,
+  afternoon: CloudSun,
+  evening: Sunset,
+  night: Moon,
+};
+
 export default function AddEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const isEdit = !!id;
 
-  const { getBenchById, addBench, updateBench, initialize, initialized, addExperience, updateExperience, deleteExperience } = useBenchStore();
+  const { getBenchById, addBench, updateBench, initialize, initialized } = useBenchStore();
   const existingBench = id ? getBenchById(id) : undefined;
 
   const [formData, setFormData] = useState({
@@ -55,7 +66,11 @@ export default function AddEditPage() {
     review: '',
   });
 
+  // Period entries are edited locally only; nothing is written to the
+  // archive until the whole form is saved, so cancelling leaves existing
+  // time-period experiences untouched.
   const [experiences, setExperiences] = useState<BenchExperience[]>([]);
+  const [formError, setFormError] = useState('');
 
   useEffect(() => {
     if (!initialized) {
@@ -79,19 +94,40 @@ export default function AddEditPage() {
         rating: existingBench.rating,
         review: existingBench.review,
       });
-      setExperiences(existingBench.experiences || []);
+      setExperiences(existingBench.experiences ?? []);
     }
   }, [isEdit, existingBench, initialized]);
+
+  useEffect(() => {
+    if (isEdit && initialized && !existingBench) {
+      navigate('/');
+    }
+  }, [isEdit, initialized, existingBench, navigate]);
 
   const handleChange = (field: string, value: string | number | boolean) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
+  const usedPeriods = experiences.map((exp) => exp.timePeriod);
+
+  const availablePeriodsForRow = (expId: string) => {
+    const own = experiences.find((exp) => exp.id === expId)?.timePeriod;
+    return TIME_PERIOD_ORDER.filter(
+      (period) => !usedPeriods.includes(period) || period === own
+    );
+  };
+
+  const nextUnusedPeriod = (): TimePeriodType | null => {
+    return TIME_PERIOD_ORDER.find((period) => !usedPeriods.includes(period)) ?? null;
+  };
+
   const handleAddExperience = () => {
+    const period = nextUnusedPeriod();
+    if (!period) return;
     const newExp: BenchExperience = {
       id: generateId(),
       benchId: id || 'temp',
-      timePeriod: 'morning',
+      timePeriod: period,
       notes: '',
       rating: 3,
     };
@@ -108,49 +144,51 @@ export default function AddEditPage() {
 
   const handleDeleteExperience = (expId: string) => {
     setExperiences(experiences.filter((exp) => exp.id !== expId));
-    if (isEdit && id) {
-      deleteExperience(id, expId);
-    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!formData.name.trim()) {
-      alert('请输入长椅名称');
+      setFormError('请输入长椅名称');
       return;
     }
     if (!formData.location.trim()) {
-      alert('请输入位置描述');
+      setFormError('请输入位置描述');
       return;
     }
 
+    // Strip local temp ids on the bench link; experience ids are kept so
+    // existing period records stay the same record when editing.
+    const experiencesToSave: BenchExperience[] = experiences.map((exp) => ({
+      ...exp,
+      notes: exp.notes.trim(),
+    }));
+
     if (isEdit && id) {
-      updateBench(id, formData);
-      experiences.forEach((exp) => {
-        const existingExp = existingBench?.experiences.find((e) => e.id === exp.id);
-        if (existingExp) {
-          updateExperience(id, exp.id, exp);
-        } else {
-          addExperience(id, exp);
-        }
-      });
-    } else {
-      addBench({
+      const ok = updateBench(id, {
         ...formData,
+        experiences: experiencesToSave.map((exp) => ({ ...exp, benchId: id })),
       });
+      if (!ok) {
+        setFormError('保存失败：本地存储不可用（可能已满或被禁用），修改未生效，原有档案数据保持不变。');
+        return;
+      }
+      navigate(`/bench/${id}`);
+    } else {
+      const newId = addBench({
+        ...formData,
+        experiences: experiencesToSave.map((exp) => ({ ...exp, benchId: 'temp' })),
+      });
+      if (!newId) {
+        setFormError('保存失败：本地存储不可用（可能已满或被禁用），新长椅未保存，填写的内容仍保留在表单中。');
+        return;
+      }
+      navigate(`/bench/${newId}`);
     }
-
-    navigate(-1);
   };
 
-  const timePeriodIcons: Record<TimePeriodType, typeof Sunrise> = {
-    morning: Sunrise,
-    noon: Sun,
-    afternoon: CloudSun,
-    evening: Sunset,
-    night: Moon,
-  };
+  const canAddPeriod = nextUnusedPeriod() !== null;
 
   return (
     <div className="container mx-auto px-4 py-6">
@@ -166,6 +204,13 @@ export default function AddEditPage() {
         <h1 className="font-serif text-2xl font-bold text-deep-brown mb-6">
           {isEdit ? '编辑长椅档案' : '添加长椅档案'}
         </h1>
+
+        {formError && (
+          <div className="mb-4 flex items-start gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600">
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <span>{formError}</span>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="paper-texture rounded-xl shadow-paper p-6 fade-in opacity-0 stagger-1">
@@ -390,7 +435,8 @@ export default function AddEditPage() {
               <button
                 type="button"
                 onClick={handleAddExperience}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-moss-green hover:bg-moss-green/10 rounded-lg transition-colors"
+                disabled={!canAddPeriod}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-moss-green hover:bg-moss-green/10 rounded-lg transition-colors disabled:text-ink-light/40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
               >
                 <Plus className="w-4 h-4" />
                 添加时段
@@ -399,7 +445,7 @@ export default function AddEditPage() {
 
             {experiences.length > 0 ? (
               <div className="space-y-4">
-                {experiences.map((exp, index) => {
+                {experiences.map((exp) => {
                   const TimeIcon = timePeriodIcons[exp.timePeriod];
                   return (
                     <div
@@ -416,9 +462,9 @@ export default function AddEditPage() {
                             }
                             className="px-2 py-1 text-sm bg-white border border-deep-brown/10 rounded-md text-deep-brown cursor-pointer"
                           >
-                            {Object.entries(TIME_PERIOD_LABELS).map(([value, label]) => (
-                              <option key={value} value={value}>
-                                {label}
+                            {availablePeriodsForRow(exp.id).map((period) => (
+                              <option key={period} value={period}>
+                                {TIME_PERIOD_LABELS[period]}
                               </option>
                             ))}
                           </select>

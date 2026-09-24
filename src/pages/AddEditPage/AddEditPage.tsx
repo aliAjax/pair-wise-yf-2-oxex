@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -10,8 +10,10 @@ import {
   Sunset,
   Moon,
   CloudSun,
+  AlertCircle,
 } from 'lucide-react';
 import { useBenchStore } from '@/store/useBenchStore';
+import type { ExperienceDraft } from '@/store/useBenchStore';
 import {
   MATERIAL_LABELS,
   ORIENTATION_LABELS,
@@ -27,35 +29,60 @@ import type {
   NoiseLevelType,
   StayDurationType,
   TimePeriodType,
-  BenchExperience,
 } from '@/types';
 import Rating from '@/components/Rating/Rating';
 import { generateId } from '@/utils/comfort';
+
+type BenchFormData = {
+  name: string;
+  location: string;
+  lat: number;
+  lng: number;
+  material: MaterialType;
+  orientation: OrientationType;
+  hasBackrest: boolean;
+  shadeLevel: ShadeLevelType;
+  noiseLevel: NoiseLevelType;
+  stayDuration: StayDurationType;
+  rating: number;
+  review: string;
+};
+
+const TIME_PERIOD_ORDER: TimePeriodType[] = ['morning', 'noon', 'afternoon', 'evening', 'night'];
+
+const emptyForm: BenchFormData = {
+  name: '',
+  location: '',
+  lat: 31.23,
+  lng: 121.47,
+  material: 'wood',
+  orientation: 'south',
+  hasBackrest: true,
+  shadeLevel: 'partial',
+  noiseLevel: 'moderate',
+  stayDuration: 'medium',
+  rating: 3,
+  review: '',
+};
 
 export default function AddEditPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const isEdit = !!id;
 
-  const { getBenchById, addBench, updateBench, initialize, initialized, addExperience, updateExperience, deleteExperience } = useBenchStore();
+  const {
+    getBenchById,
+    addBenchWithExperiences,
+    updateBenchWithExperiences,
+    initialize,
+    initialized,
+  } = useBenchStore();
   const existingBench = id ? getBenchById(id) : undefined;
 
-  const [formData, setFormData] = useState({
-    name: '',
-    location: '',
-    lat: 31.23,
-    lng: 121.47,
-    material: 'wood' as MaterialType,
-    orientation: 'south' as OrientationType,
-    hasBackrest: true,
-    shadeLevel: 'partial' as ShadeLevelType,
-    noiseLevel: 'moderate' as NoiseLevelType,
-    stayDuration: 'medium' as StayDurationType,
-    rating: 3,
-    review: '',
-  });
-
-  const [experiences, setExperiences] = useState<BenchExperience[]>([]);
+  const [formData, setFormData] = useState<BenchFormData>(emptyForm);
+  const [experiences, setExperiences] = useState<ExperienceDraft[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [formReady, setFormReady] = useState(false);
 
   useEffect(() => {
     if (!initialized) {
@@ -64,7 +91,13 @@ export default function AddEditPage() {
   }, [initialized, initialize]);
 
   useEffect(() => {
-    if (isEdit && existingBench && initialized) {
+    if (!initialized) return;
+    if (isEdit) {
+      if (!existingBench) {
+        // 档案不存在（可能是损坏数据被清理）：回到列表，不覆盖用户输入
+        navigate('/', { replace: true });
+        return;
+      }
       setFormData({
         name: existingBench.name,
         location: existingBench.location,
@@ -79,69 +112,109 @@ export default function AddEditPage() {
         rating: existingBench.rating,
         review: existingBench.review,
       });
-      setExperiences(existingBench.experiences || []);
+      // 深拷贝一份，编辑过程中的增删改都不触碰已保存的旧数据
+      setExperiences(
+        existingBench.experiences.map((exp) => ({
+          id: exp.id,
+          timePeriod: exp.timePeriod,
+          notes: exp.notes,
+          rating: exp.rating,
+        }))
+      );
+    } else {
+      setFormData(emptyForm);
+      setExperiences([]);
     }
-  }, [isEdit, existingBench, initialized]);
+    setError(null);
+    setFormReady(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialized, isEdit, id]);
 
-  const handleChange = (field: string, value: string | number | boolean) => {
+  const handleChange = (field: keyof BenchFormData, value: string | number | boolean) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
+    setError(null);
   };
+
+  const usedPeriods = useMemo(
+    () => new Set(experiences.map((exp) => exp.timePeriod)),
+    [experiences]
+  );
 
   const handleAddExperience = () => {
-    const newExp: BenchExperience = {
-      id: generateId(),
-      benchId: id || 'temp',
-      timePeriod: 'morning',
-      notes: '',
-      rating: 3,
-    };
-    setExperiences([...experiences, newExp]);
+    const nextPeriod = TIME_PERIOD_ORDER.find((period) => !usedPeriods.has(period));
+    if (!nextPeriod) {
+      setError('五个时段都已经记录过了');
+      return;
+    }
+    setExperiences((prev) => [
+      ...prev,
+      { id: generateId(), timePeriod: nextPeriod, notes: '', rating: 3 },
+    ]);
+    setError(null);
   };
 
-  const handleUpdateExperience = (expId: string, field: string, value: string | number) => {
-    setExperiences(
-      experiences.map((exp) =>
-        exp.id === expId ? { ...exp, [field]: value } : exp
+  const handleUpdateExperience = (expId: string | undefined, field: string, value: string | number) => {
+    setExperiences((prev) =>
+      prev.map((exp) =>
+        (exp.id || '') === (expId || '') ? { ...exp, [field]: value } : exp
       )
     );
+    setError(null);
   };
 
-  const handleDeleteExperience = (expId: string) => {
-    setExperiences(experiences.filter((exp) => exp.id !== expId));
-    if (isEdit && id) {
-      deleteExperience(id, expId);
-    }
+  const handleDeleteExperience = (expId: string | undefined) => {
+    // 仅移除本地暂存，旧档案要等保存成功后才会变化
+    setExperiences((prev) => prev.filter((exp) => exp.id !== expId));
+    setError(null);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!formData.name.trim()) {
-      alert('请输入长椅名称');
+      setError('请输入长椅名称');
       return;
     }
     if (!formData.location.trim()) {
-      alert('请输入位置描述');
+      setError('请输入位置描述');
       return;
     }
 
-    if (isEdit && id) {
-      updateBench(id, formData);
-      experiences.forEach((exp) => {
-        const existingExp = existingBench?.experiences.find((e) => e.id === exp.id);
-        if (existingExp) {
-          updateExperience(id, exp.id, exp);
-        } else {
-          addExperience(id, exp);
-        }
-      });
-    } else {
-      addBench({
-        ...formData,
-      });
-    }
+    const sanitizedExperiences = experiences.map((exp) => ({
+      ...exp,
+      notes: exp.notes.trim(),
+    }));
 
-    navigate(-1);
+    if (isEdit && id) {
+      const ok = updateBenchWithExperiences(
+        id,
+        {
+          ...formData,
+          name: formData.name.trim(),
+          location: formData.location.trim(),
+        },
+        sanitizedExperiences
+      );
+      if (!ok) {
+        setError('保存失败：本地存储不可用（可能空间已满），旧档案与当前填写的内容都已保留，请重试。');
+        return;
+      }
+      navigate(`/bench/${id}`, { replace: true });
+    } else {
+      const newId = addBenchWithExperiences(
+        {
+          ...formData,
+          name: formData.name.trim(),
+          location: formData.location.trim(),
+        },
+        sanitizedExperiences
+      );
+      if (!newId) {
+        setError('保存失败：本地存储不可用（可能空间已满），当前填写的内容已保留，请重试。');
+        return;
+      }
+      navigate(`/bench/${newId}`, { replace: true });
+    }
   };
 
   const timePeriodIcons: Record<TimePeriodType, typeof Sunrise> = {
@@ -151,6 +224,16 @@ export default function AddEditPage() {
     evening: Sunset,
     night: Moon,
   };
+
+  if (!formReady) {
+    return (
+      <div className="container mx-auto px-4 py-6">
+        <div className="text-center py-12">
+          <p className="text-ink-light">加载中...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="container mx-auto px-4 py-6">
@@ -166,6 +249,16 @@ export default function AddEditPage() {
         <h1 className="font-serif text-2xl font-bold text-deep-brown mb-6">
           {isEdit ? '编辑长椅档案' : '添加长椅档案'}
         </h1>
+
+        {error && (
+          <div
+            role="alert"
+            className="mb-6 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 fade-in"
+          >
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="paper-texture rounded-xl shadow-paper p-6 fade-in opacity-0 stagger-1">
@@ -399,7 +492,7 @@ export default function AddEditPage() {
 
             {experiences.length > 0 ? (
               <div className="space-y-4">
-                {experiences.map((exp, index) => {
+                {experiences.map((exp) => {
                   const TimeIcon = timePeriodIcons[exp.timePeriod];
                   return (
                     <div
@@ -416,17 +509,22 @@ export default function AddEditPage() {
                             }
                             className="px-2 py-1 text-sm bg-white border border-deep-brown/10 rounded-md text-deep-brown cursor-pointer"
                           >
-                            {Object.entries(TIME_PERIOD_LABELS).map(([value, label]) => (
-                              <option key={value} value={value}>
-                                {label}
-                              </option>
-                            ))}
+                            {Object.entries(TIME_PERIOD_LABELS).map(([value, label]) => {
+                              const taken = usedPeriods.has(value as TimePeriodType) && value !== exp.timePeriod;
+                              return (
+                                <option key={value} value={value} disabled={taken}>
+                                  {label}
+                                  {taken ? '（已记录）' : ''}
+                                </option>
+                              );
+                            })}
                           </select>
                         </div>
                         <button
                           type="button"
                           onClick={() => handleDeleteExperience(exp.id)}
                           className="p-1.5 text-red-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                          aria-label="删除该时段记录"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>

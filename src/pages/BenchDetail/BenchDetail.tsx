@@ -10,10 +10,14 @@ import {
   Compass,
   Edit3,
   Trash2,
+  Plus,
+  Save,
+  X,
   Sunrise,
   Sunset,
   Moon,
   CloudSun,
+  AlertCircle,
 } from 'lucide-react';
 import { useBenchStore } from '@/store/useBenchStore';
 import {
@@ -28,11 +32,24 @@ import type { TimePeriodType } from '@/types';
 import Rating from '@/components/Rating/Rating';
 import { calculateComfortScore, getComfortLevel, getComfortColor } from '@/utils/comfort';
 
+const TIME_PERIOD_ORDER: TimePeriodType[] = ['morning', 'noon', 'afternoon', 'evening', 'night'];
+
+interface ExpDraft {
+  timePeriod: TimePeriodType;
+  notes: string;
+  rating: number;
+}
+
 export default function BenchDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { getBenchById, deleteBench, initialize, initialized } = useBenchStore();
+  const { getBenchById, deleteBench, upsertExperience, deleteExperience, initialize, initialized } =
+    useBenchStore();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  // null = 未在编辑；'new' = 新增时段；其余为正在编辑的时段记录 id
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [draft, setDraft] = useState<ExpDraft>({ timePeriod: 'morning', notes: '', rating: 3 });
+  const [expError, setExpError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!initialized) {
@@ -44,7 +61,7 @@ export default function BenchDetail() {
 
   useEffect(() => {
     if (bench === undefined && initialized) {
-      navigate('/');
+      navigate('/', { replace: true });
     }
   }, [bench, initialized, navigate]);
 
@@ -70,17 +87,75 @@ export default function BenchDetail() {
     night: Moon,
   };
 
-  const sortedExperiences = [...bench.experiences].sort((a, b) => {
-    const order: TimePeriodType[] = ['morning', 'noon', 'afternoon', 'evening', 'night'];
-    return order.indexOf(a.timePeriod) - order.indexOf(b.timePeriod);
-  });
+  const sortedExperiences = [...bench.experiences].sort(
+    (a, b) => TIME_PERIOD_ORDER.indexOf(a.timePeriod) - TIME_PERIOD_ORDER.indexOf(b.timePeriod)
+  );
+
+  const availablePeriods = TIME_PERIOD_ORDER.filter(
+    (period) => !bench.experiences.some((exp) => exp.timePeriod === period)
+  );
+
+  const startAdd = () => {
+    if (availablePeriods.length === 0) {
+      setExpError('五个时段都已经记录过了');
+      return;
+    }
+    setEditingKey('new');
+    setDraft({ timePeriod: availablePeriods[0], notes: '', rating: 3 });
+    setExpError(null);
+  };
+
+  const startEdit = (expId: string) => {
+    const exp = bench.experiences.find((item) => item.id === expId);
+    if (!exp) return;
+    setEditingKey(expId);
+    setDraft({ timePeriod: exp.timePeriod, notes: exp.notes, rating: exp.rating });
+    setExpError(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingKey(null);
+    setExpError(null);
+  };
+
+  const saveExperience = () => {
+    if (!id) return;
+    if (!draft.notes.trim()) {
+      setExpError('请填写该时段的体验备注');
+      return;
+    }
+    const ok = upsertExperience(id, editingKey === 'new' ? null : editingKey, {
+      timePeriod: draft.timePeriod,
+      notes: draft.notes.trim(),
+      rating: draft.rating,
+    });
+    if (!ok) {
+      setExpError('保存失败：本地存储不可用（可能空间已满），原有记录与当前填写的内容都已保留，请重试。');
+      return;
+    }
+    setEditingKey(null);
+    setExpError(null);
+  };
+
+  const handleRemoveExperience = (expId: string) => {
+    if (!id) return;
+    if (!deleteExperience(id, expId)) {
+      setExpError('删除失败：本地存储不可用，原有记录未被改动，请重试。');
+    }
+  };
 
   const handleDelete = () => {
     if (id) {
-      deleteBench(id);
-      navigate('/');
+      if (!deleteBench(id)) {
+        setShowDeleteConfirm(false);
+        setExpError('删除失败：本地存储不可用，档案未被改动，请重试。');
+        return;
+      }
+      navigate('/', { replace: true });
     }
   };
+
+  const DraftIcon = timePeriodIcons[draft.timePeriod];
 
   return (
     <div className="container mx-auto px-4 py-6">
@@ -203,7 +278,7 @@ export default function BenchDetail() {
                 </button>
                 <button
                   onClick={() => setShowDeleteConfirm(true)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                  className="flex items-center gap-1.5 px-1.5 text-sm text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                 >
                   <Trash2 className="w-4 h-4" />
                   删除
@@ -215,18 +290,148 @@ export default function BenchDetail() {
 
         <div className="space-y-6">
           <div className="paper-texture rounded-xl shadow-paper p-6 fade-in opacity-0 stagger-2">
-            <h2 className="font-serif text-lg font-semibold text-deep-brown mb-4">
-              分时段体验
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-serif text-lg font-semibold text-deep-brown">
+                分时段体验
+              </h2>
+              <button
+                type="button"
+                onClick={startAdd}
+                disabled={editingKey !== null}
+                className="flex items-center gap-1 px-2 py-1 text-xs text-moss-green hover:bg-moss-green/10 rounded-lg transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                添加时段
+              </button>
+            </div>
+
+            {expError && (
+              <div
+                role="alert"
+                className="mb-4 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 fade-in"
+              >
+                <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                <span>{expError}</span>
+              </div>
+            )}
+
+            {editingKey === 'new' && (
+              <div className="mb-4 p-4 bg-white/70 border border-moss-green/30 rounded-lg fade-in">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <DraftIcon className="w-4 h-4 text-ochre" />
+                    <select
+                      value={draft.timePeriod}
+                      onChange={(e) => setDraft((prev) => ({ ...prev, timePeriod: e.target.value as TimePeriodType }))}
+                      className="px-2 py-1 text-sm bg-white border border-deep-brown/10 rounded-md text-deep-brown cursor-pointer"
+                    >
+                      {availablePeriods.map((period) => (
+                        <option key={period} value={period}>
+                          {TIME_PERIOD_LABELS[period]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={saveExperience}
+                      className="p-1.5 text-moss-green hover:bg-moss-green/10 rounded-md transition-colors"
+                      aria-label="保存时段记录"
+                    >
+                      <Save className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={cancelEdit}
+                      className="p-1.5 text-ink-light hover:bg-deep-brown/5 rounded-md transition-colors"
+                      aria-label="取消"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+                <div className="mb-3">
+                  <label className="text-xs text-ink-light mb-1 block">时段评分</label>
+                  <Rating
+                    value={draft.rating}
+                    onChange={(value) => setDraft((prev) => ({ ...prev, rating: value }))}
+                    size="sm"
+                  />
+                </div>
+                <textarea
+                  autoFocus
+                  value={draft.notes}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, notes: e.target.value }))}
+                  placeholder="记录这个时段的体验..."
+                  rows={2}
+                  className="w-full px-3 py-2 text-sm bg-white border border-deep-brown/10 rounded-md text-deep-brown placeholder:text-ink-light/60 resize-none"
+                />
+              </div>
+            )}
 
             {sortedExperiences.length > 0 ? (
               <div className="space-y-4">
                 {sortedExperiences.map((experience) => {
                   const TimeIcon = timePeriodIcons[experience.timePeriod];
+                  const isEditing = editingKey === experience.id;
+
+                  if (isEditing) {
+                    return (
+                      <div
+                        key={experience.id}
+                        className="p-4 bg-white/70 border border-moss-green/30 rounded-lg fade-in"
+                      >
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <TimeIcon className="w-4 h-4 text-ochre" />
+                            <span className="font-medium text-deep-brown text-sm">
+                              {TIME_PERIOD_LABELS[experience.timePeriod]}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={saveExperience}
+                              className="p-1.5 text-moss-green hover:bg-moss-green/10 rounded-md transition-colors"
+                              aria-label="保存修改"
+                            >
+                              <Save className="w-4 h-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEdit}
+                              className="p-1.5 text-ink-light hover:bg-deep-brown/5 rounded-md transition-colors"
+                              aria-label="取消"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mb-3">
+                          <label className="text-xs text-ink-light mb-1 block">时段评分</label>
+                          <Rating
+                            value={draft.rating}
+                            onChange={(value) => setDraft((prev) => ({ ...prev, rating: value }))}
+                            size="sm"
+                          />
+                        </div>
+                        <textarea
+                          autoFocus
+                          value={draft.notes}
+                          onChange={(e) => setDraft((prev) => ({ ...prev, notes: e.target.value }))}
+                          placeholder="记录这个时段的体验..."
+                          rows={2}
+                          className="w-full px-3 py-2 text-sm bg-white border border-deep-brown/10 rounded-md text-deep-brown placeholder:text-ink-light/60 resize-none"
+                        />
+                      </div>
+                    );
+                  }
+
                   return (
                     <div
                       key={experience.id}
-                      className="p-4 bg-warm-cream/50 rounded-lg hover:bg-warm-cream transition-colors"
+                      className="group p-4 bg-warm-cream/50 rounded-lg hover:bg-warm-cream transition-colors"
                     >
                       <div className="flex items-center justify-between mb-2">
                         <div className="flex items-center gap-2">
@@ -235,7 +440,27 @@ export default function BenchDetail() {
                             {TIME_PERIOD_LABELS[experience.timePeriod]}
                           </span>
                         </div>
-                        <Rating value={experience.rating} readOnly size="sm" />
+                        <div className="flex items-center gap-1">
+                          <Rating value={experience.rating} readOnly size="sm" />
+                          <button
+                            type="button"
+                            onClick={() => startEdit(experience.id)}
+                            disabled={editingKey !== null}
+                            className="ml-1 p-1 text-ink-light/60 hover:text-moss-green hover:bg-moss-green/10 rounded-md transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+                            aria-label={`编辑${TIME_PERIOD_LABELS[experience.timePeriod]}记录`}
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveExperience(experience.id)}
+                            disabled={editingKey !== null}
+                            className="p-1 text-red-400/70 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+                            aria-label={`删除${TIME_PERIOD_LABELS[experience.timePeriod]}记录`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                       <p className="text-sm text-ink-light leading-relaxed">
                         {experience.notes}
@@ -245,17 +470,19 @@ export default function BenchDetail() {
                 })}
               </div>
             ) : (
-              <div className="text-center py-8">
-                <div className="w-12 h-12 rounded-full bg-moss-green/10 flex items-center justify-center mx-auto mb-3">
-                  <Clock className="w-6 h-6 text-moss-green/50" />
+              editingKey !== 'new' && (
+                <div className="text-center py-8">
+                  <div className="w-12 h-12 rounded-full bg-moss-green/10 flex items-center justify-center mx-auto mb-3">
+                    <Clock className="w-6 h-6 text-moss-green/50" />
+                  </div>
+                  <p className="text-sm text-ink-light">
+                    还没有分时段体验记录
+                  </p>
+                  <p className="text-xs text-ink-light/60 mt-1">
+                    点击右上角「添加时段」记下不同时间的感受
+                  </p>
                 </div>
-                <p className="text-sm text-ink-light">
-                  还没有分时段体验记录
-                </p>
-                <p className="text-xs text-ink-light/60 mt-1">
-                  编辑长椅时可以添加
-                </p>
-              </div>
+              )
             )}
           </div>
 

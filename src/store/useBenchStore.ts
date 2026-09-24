@@ -1,8 +1,11 @@
 import { create } from 'zustand';
-import type { Bench, BenchExperience, MaterialType, OrientationType, ShadeLevelType, NoiseLevelType, StayDurationType } from '@/types';
+import type { Bench, BenchExperience, MaterialType, OrientationType, ShadeLevelType, NoiseLevelType } from '@/types';
 import { loadBenches, saveBenches } from '@/utils/storage';
 import { generateId } from '@/utils/comfort';
 import { mockBenches } from '@/data/mockBenches';
+
+/** 表单提交的时段体验（新增时还没有 id / benchId） */
+export type ExperienceDraft = Omit<BenchExperience, 'id' | 'benchId'> & { id?: string };
 
 interface BenchState {
   benches: Bench[];
@@ -22,13 +25,26 @@ interface BenchActions {
   setShadeFilter: (shade: ShadeLevelType | null) => void;
   setNoiseFilter: (noise: NoiseLevelType | null) => void;
   clearFilters: () => void;
-  addBench: (bench: Omit<Bench, 'id' | 'createdAt' | 'updatedAt' | 'experiences'>) => void;
-  updateBench: (id: string, updates: Partial<Bench>) => void;
-  deleteBench: (id: string) => void;
+  /** 新增长椅及其时段体验；持久化失败时返回 null，调用方需提示并保留表单 */
+  addBenchWithExperiences: (
+    benchData: Omit<Bench, 'id' | 'createdAt' | 'updatedAt' | 'experiences'>,
+    experiences: ExperienceDraft[]
+  ) => string | null;
+  /** 整体覆盖一张长椅的资料与时段体验（编辑提交）；返回是否保存成功 */
+  updateBenchWithExperiences: (
+    id: string,
+    updates: Partial<Omit<Bench, 'id' | 'createdAt' | 'experiences'>>,
+    experiences: ExperienceDraft[]
+  ) => boolean;
+  deleteBench: (id: string) => boolean;
   getBenchById: (id: string) => Bench | undefined;
-  addExperience: (benchId: string, experience: Omit<BenchExperience, 'id' | 'benchId'>) => void;
-  updateExperience: (benchId: string, expId: string, updates: Partial<BenchExperience>) => void;
-  deleteExperience: (benchId: string, expId: string) => void;
+  /** 新增或修改单条时段体验（详情页使用）；expId 为空表示新增 */
+  upsertExperience: (
+    benchId: string,
+    expId: string | null,
+    data: Omit<BenchExperience, 'id' | 'benchId'>
+  ) => boolean;
+  deleteExperience: (benchId: string, expId: string) => boolean;
   getFilteredBenches: () => Bench[];
 }
 
@@ -42,16 +58,30 @@ const initialState: BenchState = {
   initialized: false,
 };
 
+/** 把表单里的时段草稿落成属于某张长椅的完整记录 */
+function materializeExperiences(benchId: string, drafts: ExperienceDraft[]): BenchExperience[] {
+  return drafts.map((draft) => ({
+    id: draft.id || generateId(),
+    benchId,
+    timePeriod: draft.timePeriod,
+    notes: draft.notes,
+    rating: draft.rating,
+  }));
+}
+
 export const useBenchStore = create<BenchState & BenchActions>((set, get) => ({
   ...initialState,
 
   initialize: () => {
+    if (get().initialized) return;
     const stored = loadBenches();
-    if (stored.length > 0) {
-      set({ benches: stored, initialized: true });
-    } else {
+    if (stored === null) {
+      // 本地没有可用档案（首次打开或档案损坏）：播种示例数据
       set({ benches: mockBenches, initialized: true });
       saveBenches(mockBenches);
+    } else {
+      // 包括空数组：用户删光后不应被示例数据"复活"
+      set({ benches: stored, initialized: true });
     }
   },
 
@@ -69,73 +99,63 @@ export const useBenchStore = create<BenchState & BenchActions>((set, get) => ({
     noiseFilter: null,
   }),
 
-  addBench: (benchData) => {
+  addBenchWithExperiences: (benchData, experiences) => {
     const now = new Date().toISOString();
+    const id = generateId();
     const newBench: Bench = {
       ...benchData,
-      id: generateId(),
-      experiences: [],
+      id,
+      experiences: materializeExperiences(id, experiences),
       createdAt: now,
       updatedAt: now,
     };
     const newBenches = [newBench, ...get().benches];
+    // 先持久化：失败则内存也不更新，旧数据原样保留
+    if (!saveBenches(newBenches)) return null;
     set({ benches: newBenches });
-    saveBenches(newBenches);
+    return id;
   },
 
-  updateBench: (id, updates) => {
-    const newBenches = get().benches.map((bench) =>
-      bench.id === id
-        ? { ...bench, ...updates, updatedAt: new Date().toISOString() }
-        : bench
-    );
+  updateBenchWithExperiences: (id, updates, experiences) => {
+    const newBenches = get().benches.map((bench) => {
+      if (bench.id !== id) return bench;
+      return {
+        ...bench,
+        ...updates,
+        id: bench.id,
+        createdAt: bench.createdAt,
+        experiences: materializeExperiences(id, experiences),
+        updatedAt: new Date().toISOString(),
+      } as Bench;
+    });
+    if (!saveBenches(newBenches)) return false;
     set({ benches: newBenches });
-    saveBenches(newBenches);
+    return true;
   },
 
   deleteBench: (id) => {
     const newBenches = get().benches.filter((bench) => bench.id !== id);
+    if (!saveBenches(newBenches)) return false;
     set({ benches: newBenches });
-    saveBenches(newBenches);
+    return true;
   },
 
   getBenchById: (id) => {
     return get().benches.find((bench) => bench.id === id);
   },
 
-  addExperience: (benchId, experienceData) => {
-    const newExperience: BenchExperience = {
-      ...experienceData,
-      id: generateId(),
-      benchId,
-    };
-    const newBenches = get().benches.map((bench) =>
-      bench.id === benchId
-        ? {
-            ...bench,
-            experiences: [...bench.experiences, newExperience],
-            updatedAt: new Date().toISOString(),
-          }
-        : bench
-    );
+  upsertExperience: (benchId, expId, data) => {
+    const newBenches = get().benches.map((bench) => {
+      if (bench.id !== benchId) return bench;
+      const exists = bench.experiences.some((exp) => exp.id === expId);
+      const experiences = exists
+        ? bench.experiences.map((exp) => (exp.id === expId ? { ...exp, ...data } : exp))
+        : [...bench.experiences, { id: generateId(), benchId, ...data }];
+      return { ...bench, experiences, updatedAt: new Date().toISOString() };
+    });
+    if (!saveBenches(newBenches)) return false;
     set({ benches: newBenches });
-    saveBenches(newBenches);
-  },
-
-  updateExperience: (benchId, expId, updates) => {
-    const newBenches = get().benches.map((bench) =>
-      bench.id === benchId
-        ? {
-            ...bench,
-            experiences: bench.experiences.map((exp) =>
-              exp.id === expId ? { ...exp, ...updates } : exp
-            ),
-            updatedAt: new Date().toISOString(),
-          }
-        : bench
-    );
-    set({ benches: newBenches });
-    saveBenches(newBenches);
+    return true;
   },
 
   deleteExperience: (benchId, expId) => {
@@ -148,27 +168,28 @@ export const useBenchStore = create<BenchState & BenchActions>((set, get) => ({
           }
         : bench
     );
+    if (!saveBenches(newBenches)) return false;
     set({ benches: newBenches });
-    saveBenches(newBenches);
+    return true;
   },
 
   getFilteredBenches: () => {
     const { benches, searchQuery, materialFilter, orientationFilter, shadeFilter, noiseFilter } = get();
-    
+
     return benches.filter((bench) => {
-      if (searchQuery) {
-        const query = searchQuery.toLowerCase();
+      if (searchQuery.trim()) {
+        const query = searchQuery.trim().toLowerCase();
         const matchName = bench.name.toLowerCase().includes(query);
         const matchLocation = bench.location.toLowerCase().includes(query);
         const matchReview = bench.review.toLowerCase().includes(query);
         if (!matchName && !matchLocation && !matchReview) return false;
       }
-      
+
       if (materialFilter && bench.material !== materialFilter) return false;
       if (orientationFilter && bench.orientation !== orientationFilter) return false;
       if (shadeFilter && bench.shadeLevel !== shadeFilter) return false;
       if (noiseFilter && bench.noiseLevel !== noiseFilter) return false;
-      
+
       return true;
     });
   },
